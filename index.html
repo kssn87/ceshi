@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <title>Live2D AI 聊天助手</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: "Microsoft YaHei", sans-serif;
+        }
+
+        body {
+            background: #f0f8ff;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 15px;
+        }
+
+        /* Live2D 容器 */
+        #live2d-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: -1;
+            pointer-events: none;
+        }
+
+            #live2d-container canvas {
+                display: block;
+                width: 100%;
+                height: 100%;
+            }
+
+        /* 聊天区域 */
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-bottom: 15px;
+            background: rgba(255,255,255,0.85);
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        /* 消息气泡 */
+        .bubble {
+            max-width: 70%;
+            padding: 10px 14px;
+            border-radius: 18px;
+            line-height: 1.5;
+            font-size: 15px;
+            word-wrap: break-word;
+        }
+
+            .bubble.user {
+                align-self: flex-end;
+                background: #1e80ff;
+                color: white;
+                border-bottom-right-radius: 6px;
+            }
+
+            .bubble.ai {
+                align-self: flex-start;
+                background: white;
+                color: #333;
+                border-bottom-left-radius: 6px;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            }
+
+            .bubble.loading {
+                align-self: flex-start;
+                background: #f0f0f0;
+                color: #666;
+                font-style: italic;
+            }
+
+        /* 输入框 */
+        .input-wrapper {
+            display: flex;
+            gap: 8px;
+        }
+
+        #input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1px solid #ddd;
+            border-radius: 24px;
+            outline: none;
+            font-size: 15px;
+        }
+
+            #input:focus {
+                border-color: #1e80ff;
+            }
+
+        button {
+            padding: 12px 20px;
+            background: #1e80ff;
+            color: white;
+            border: none;
+            border-radius: 24px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+            button:hover {
+                background: #0066cc;
+            }
+
+            button:disabled {
+                background: #ccc;
+                cursor: not-allowed;
+            }
+    </style>
+
+    <!-- Live2D 依赖CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/live2dcubismcore@5.0.0/live2dcubismcore.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.14.5/dist/index.min.js"></script>
+</head>
+
+<body>
+    <div id="live2d-container"></div>
+    <div class="chat-container" id="chatBox"></div>
+
+    <div class="input-wrapper">
+        <input type="text" id="input" placeholder="输入消息..." autocomplete="off" />
+        <button id="sendBtn">发送</button>
+    </div>
+
+    <script>
+        // ======================
+        // 1. 火山引擎ARK配置
+        // ======================
+        const ARK_API_CONFIG = {
+        endpoint: "https://ark.cn-beijing.volces.com/api/v3/responses",
+        apiKey: "8d9a575c-e885-4b3f-89ad-b43f35c5e851",
+        model: "doubao-seed-2-0-pro-260215",
+        useMock: false // true=测试假回复 false=真实调用API
+        };
+
+        // ======================
+        // 2. Live2D模型配置
+        // ======================
+        const LIVE2D_MODEL_CONFIG = {
+        modelPath: "model/MO.v1.3.3/MO.model3.json",
+        scale: 0.8,
+        offsetX: 0,
+        offsetY: 50,
+        motions: { idle: "idle", speak: "wave" }
+        };
+
+        // ======================
+        // Live2D全局变量
+        // ======================
+        let live2dModel = null;
+        let pixiApp = null;
+
+        // 初始化Live2D
+        async function initLive2DModel() {
+        try {
+        pixiApp = new PIXI.Application({
+        backgroundAlpha: 0,
+        resizeTo: window,
+        antialias: true,
+        preserveDrawingBuffer: true
+        });
+        document.getElementById("live2d-container").appendChild(pixiApp.view);
+
+        // 加载模型
+        live2dModel = await PIXI.live2d.Live2DModel.from(LIVE2D_MODEL_CONFIG.modelPath);
+        live2dModel.scale.set(LIVE2D_MODEL_CONFIG.scale);
+        updateModelPosition();
+
+        pixiApp.stage.addChild(live2dModel);
+        window.addEventListener("resize", updateModelPosition);
+
+        playModelMotion("idle");
+        console.log("✅ Live2D模型加载成功");
+        } catch (err) {
+        console.error("❌ Live2D加载失败：", err);
+        addMessage("⚠️ Live2D模型加载失败，请检查模型路径", "ai");
+        }
+        }
+
+        // 更新模型位置
+        function updateModelPosition() {
+        if (!live2dModel || !pixiApp) return;
+        live2dModel.x = pixiApp.screen.width / 2 + LIVE2D_MODEL_CONFIG.offsetX;
+        live2dModel.y = pixiApp.screen.height / 2 + LIVE2D_MODEL_CONFIG.offsetY;
+        }
+
+        // 播放动作
+        function playModelMotion(motionKey) {
+        if (!live2dModel) return;
+        const motion = LIVE2D_MODEL_CONFIG.motions[motionKey] || motionKey;
+        try {
+        live2dModel.motion(motion);
+        } catch (e) {
+        console.log("动作播放失败：", e);
+        }
+        }
+
+        // ======================
+        // 聊天DOM操作
+        // ======================
+        const chatBox = document.getElementById("chatBox");
+        const inputEl = document.getElementById("input");
+        const sendBtn = document.getElementById("sendBtn");
+
+        function addMessage(text, type) {
+        const bubble = document.createElement("div");
+        bubble.className = `bubble ${type}`;
+        bubble.textContent = text;
+        chatBox.appendChild(bubble);
+        chatBox.scrollTop = chatBox.scrollHeight;
+        return bubble;
+        }
+
+        // ======================
+        // 模拟AI回复（测试用）
+        // ======================
+        async function mockAIReply(msg) {
+        await new Promise(r => setTimeout(r, 800));
+        const list = [
+        "你好！我是你的AI助手~",
+        "收到消息啦，正在思考中",
+        "可以问我储能、Live2D相关问题哦",
+        "这个问题很棒，我们一起聊聊"
+        ];
+        return list[Math.floor(Math.random() * list.length)];
+        }
+
+        // ======================
+        // 火山ARK真实请求
+        // ======================
+        async function callArkAI(userMsg) {
+  // （保留原有请求逻辑）
+  try {
+    const response = await fetch(ARK_API_CONFIG.endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${ARK_API_CONFIG.apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: ARK_API_CONFIG.model,
+        input: [{
+          role: "user",
+          content: [{ type: "input_text", text: userMsg }]
+        }]
+      })
+    });
+    const data = await response.json();
+    
+    // 提取思考过程和最终回答
+    const reasoning = data.output?.[0]?.summary?.[0]?.text || "未获取到思考过程";
+    const answer = data.output?.[1]?.content?.[0]?.text || "抱歉，我没理解你的意思";
+    
+    // 返回结构化数据
+    return { reasoning, answer };
+  } catch (err) {
+    throw new Error(`API调用失败: ${err.message}`);
+  }
+}
+      // ======================
+      // 📌 核心：sendMessage 函数（修复[object Object]，正确展示思考+回答）
+      // ======================
+async function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text) return;
+
+  // 禁用输入，防止重复发送
+  inputEl.disabled = true;
+  sendBtn.disabled = true;
+
+  // 显示用户消息
+  addMessage(text, "user");
+  // 清空输入框
+  inputEl.value = "";
+  // 显示加载中
+  const loadingBubble = addMessage("正在思考中...", "loading");
+
+  try {
+    let aiReply;
+    if (ARK_API_CONFIG.useMock) {
+      // Mock测试模式：模拟思考过程+回答
+      await new Promise(resolve => setTimeout(resolve, 800));
+      aiReply = {
+        reasoning: "我正在分析你输入的hello，先友好回应，再询问需求...",
+        answer: "hello~你好呀😊 不管是有问题想咨询、需要帮忙查资料、想聊天唠嗑还是要做文案翻译、创意构思之类的，都可以告诉我哦！"
+      };
+    } else {
+      // 真实API调用：aiReply是{reasoning, answer}对象
+      aiReply = await callArkAI(text);
+    }
+
+    // 移除加载中气泡
+    chatBox.removeChild(loadingBubble);
+
+    // ✅ 关键修复：从对象中提取文本，再传给addMessage！
+    // 1. 先展示思考过程（灰色斜体样式）
+    addMessage(`🤔 思考过程：<br>${aiReply.reasoning}`, "ai", true);
+    // 2. 再展示最终回答（正常白色气泡样式）
+    addMessage(`✅ 最终回答：<br>${aiReply.answer}`, "ai");
+
+    // 触发Live2D说话动作
+    playModelMotion("speak");
+    // 3秒后恢复待机动作
+    setTimeout(() => playModelMotion("idle"), 3000);
+
+  } catch (error) {
+    // 错误处理
+    chatBox.removeChild(loadingBubble);
+    addMessage(`❌ 出错了: ${error.message}`, "ai");
+  } finally {
+    // 恢复输入状态
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
+    inputEl.focus();
+  }
+}
+
+        // ======================
+        // 事件绑定
+        // ======================
+        sendBtn.addEventListener("click", sendMessage);
+        inputEl.addEventListener("keydown", e => e.key === "Enter" && sendMessage());
+
+        // 页面加载
+        window.onload = async () => {
+        await initLive2DModel();
+        addMessage("你好呀！我是你的AI助手😊", "ai");
+        };
+
+        // 释放资源
+        window.onbeforeunload = () => {
+        pixiApp?.destroy(true);
+        window.speechSynthesis?.cancel();
+        };
+    </script>
+</body>
+</html>
